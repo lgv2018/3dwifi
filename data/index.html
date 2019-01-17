@@ -1,9 +1,21 @@
 <!DOCTYPE html>
 <html>
     <head>
-      <script src="/aux.js" type="text/javascript"></script>
+      <script src="smallfram.js" type="text/javascript"></script>
       <script type="text/javascript">
-        void send3dCommand(command) {
+        function init() {
+          $(".movbtn").foreach(function(i, elem) {
+            $(elem).on('click', function() {
+              alert("G0 " + elem.value);
+            })
+          })
+          $(".home").foreach(function(i, elem) {
+            $(elem).on('click', function() {
+              alert("G28 " + elem.value);
+            })
+          })
+        }
+        function send3dCommand(command) {
           var http = new XMLHttpRequest();
           http.open("GET", "/3dcmd?cmd=" + command, true);
           http.onreadystatechange = function() {
@@ -22,36 +34,39 @@
         p { display:  inline-block; }
       </style>
     </head>
-    <body>
+    <body onload="init()">
       <div id="alert"></div>
       <div class="container">
         <div class="title">Movement</div>
         <div id="xmov">
           <p>X</p>
-          <button id="xminus10" value="X-10">-10</button>
-          <button id="xminus1" value="X-1">-1</button>
-          <button id="xminus0_1" value="X-0.1">-0.1</button>
-          <button id="xplus0_1" value="X0.1">0.1</button>
-          <button id="xplus1" value="X1">1</button>
-          <button id="xplus10" value="X10">10</button>
+          <button class="home" value="X">Home</button>
+          <button class="movbtn" value="X-10">-10</button>
+          <button class="movbtn" value="X-1">-1</button>
+          <button class="movbtn" value="X-0.1">-0.1</button>
+          <button class="movbtn" value="X0.1">0.1</button>
+          <button class="movbtn" value="X1">1</button>
+          <button class="movbtn" value="X10">10</button>
         </div>
         <div id="ymov">
           <p>Y</p>
-          <button id="yminus10" value="Y-10">-10</button>
-          <button id="yminus1" value="Y-1">-1</button>
-          <button id="yminus0_1" value="Y-0.1">-0.1</button>
-          <button id="yplus0_1" value="Y0.1">0.1</button>
-          <button id="yplus1" value="Y1">1</button>
-          <button id="yplus10" value="Y10">10</button>
+          <button class="home" value="Y">Home</button>
+          <button class="movbtn" value="Y-10">-10</button>
+          <button class="movbtn" value="Y-1">-1</button>
+          <button class="movbtn" value="Y-0.1">-0.1</button>
+          <button class="movbtn" value="Y0.1">0.1</button>
+          <button class="movbtn" value="Y1">1</button>
+          <button class="movbtn" value="Y10">10</button>
         </div>
         <div id="ymov">
           <p>Z</p>
-          <button id="zminus10" value="Z-10">-10</button>
-          <button id="zminus1" value="Z-1">-1</button>
-          <button id="zminus0_1" value="Z-0.1">-0.1</button>
-          <button id="zplus0_1" value="Z0.1">0.1</button>
-          <button id="zplus1" value="Z1">1</button>
-          <button id="zplus10" value="Z10">10</button>
+          <button class="home" value="Z">Home</button>
+          <button class="movbtn" value="Z-10">-10</button>
+          <button class="movbtn" value="Z-1">-1</button>
+          <button class="movbtn" value="Z-0.1">-0.1</button>
+          <button class="movbtn" value="Z0.1">0.1</button>
+          <button class="movbtn" value="Z1">1</button>
+          <button class="movbtn" value="Z10">10</button>
         </div>
       </div>
       <a href="/upload.html">Upload</a>
