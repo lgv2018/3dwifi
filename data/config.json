@@ -1,0 +1,13 @@
+{
+  "mDNS_hostname": "esp8266",
+
+  "wifi_ap": false,
+  "wifi_ssid": "TATU 2",
+  "wifi_password": "bolarolou",
+
+  "serial_speed": "115200",
+
+  "sd_file_new": "M20 /%s",
+  "sd_file_finish": "M29",
+  "sd_file_print": ""
+}
