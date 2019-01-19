@@ -15,6 +15,7 @@ File fsUploadFile;              // File object to temporary receive a file
 String getContentType(String filename); // convert the file extension to the MIME type
 bool handleFileRead(String path);       // send the right file to the client (if it exists)
 void handleFileUpload();                // upload a new file to the SPIFFS]
+void handleGcode();
 
 void serial_message(const char *msg, const char *value = NULL) {
   Serial.print("M117 ");
@@ -114,13 +115,15 @@ void setup() {
     handleFileUpload                                    // Receive and save the file
   );
 
+  server.on("/gcode", HTTP_GET, handleGcode);
+
   server.onNotFound([]() {                              // If the client requests any URI
     if (!handleFileRead(server.uri()))                  // send it if it exists
       server.send(404, "text/plain", "404: Not Found"); // otherwise, respond with a 404 (Not Found) error
   });
 
   server.begin();                           // Actually start the server
-  serial_message("HTTP server started");
+  //serial_message("HTTP server started");
 }
 
 void loop() {
@@ -132,6 +135,7 @@ String getContentType(String filename) { // convert the file extension to the MI
   else if (filename.endsWith(".css")) return "text/css";
   else if (filename.endsWith(".js")) return "application/javascript";
   else if (filename.endsWith(".ico")) return "image/x-icon";
+  else if (filename.endsWith(".svg")) return "image/svg+xml";
   else if (filename.endsWith(".gz")) return "application/x-gzip";
   return "text/plain";
 }
@@ -156,6 +160,32 @@ bool handleFileRead(String path) {
   }
 
   return false;
+}
+
+void handleGcode() {
+  String cmd = server.arg("cmd");
+  Serial.write(cmd.c_str());
+  Serial.write('\n');
+  Serial.flush();
+
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.sendHeader("Content-type", "text/plain");
+  server.send(200);
+
+  int timeout = 300;
+  do {
+    size_t len = Serial.available();
+    if (len > 0) {
+      char buf[len+1];
+      Serial.readBytes(buf, len);
+      buf[len] = 0;
+      server.sendContent(buf);
+    } else {
+      delay(10);
+      if (--timeout == 0) // timeout
+        break;
+    }
+  } while (true);
 }
 
 void handleFileUpload() {
