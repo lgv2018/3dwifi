@@ -32,8 +32,19 @@
           $('#clear').on('click', function() { cmds.html(''); });
           $('#cmd').on('keyup', function(event) { if (event.key == 'Enter') { send.element.click(); }});
 
-          // call M110 handshaking, this should get buffered/available data
-          send_gcode('M110');
+          //readOutOfBangMessage();
+          // call M110 handshaking
+          //send_gcode('M110');
+        }
+
+        function readOutOfBangMessage() {
+          request('/msg', function(resp) {
+            if (resp !== "") {
+              add_cmd("Printer message");
+              add_resp(resp);
+            }
+          }, function () {});
+          setTimeout(readOutOfBangMessage, 2000);
         }
 
         function show_alert(message) {
@@ -42,21 +53,23 @@
           setTimeout(function(){ alertdiv.element.style.display = 'none'; }, 5000);
         }
 
-        function request(url, onsuccess) {
-          var req = new XMLHttpRequest();
-          req.open("GET", url, true);
-          req.onreadystatechange = function() {
-            if (req.readyState === 4) {
-              if (req.status === 200) {
-                onsuccess(req.responseText);
-              } else {
-                if (req.responseText == '' && req.status == 0)
-                  show_alert('Timeout.');
-                else
-                  show_alert(req.responseText);
-              }
+        function ready_state_change(req, onsuccess, onfail) {
+          if (req.readyState === 4) {
+            if (req.status === 200) {
+              onsuccess(req.responseText);
+            } else if (!onfail){
+              if (req.responseText == '' && req.status == 0)
+                show_alert('Timeout.');
+              else
+                show_alert(req.responseText);
             }
           }
+        }
+
+        function request(url, onsuccess, onfail) {
+          var req = new XMLHttpRequest();
+          req.open("GET", url, true);
+          req.onreadystatechange = function() { ready_state_change(req, onsuccess, onfail); };
           req.send();
         }
 
@@ -84,6 +97,32 @@
           });
         }
 
+        function upload_sd_file(filename) {
+          filename = filename.split(/(\\|\/)/g).pop();
+          var formData = new FormData();
+          formData.append('filename', filename);
+          formData.append('file', $("#sdfile").element.files[0]);
+
+          var prgbar = $("#prgbar").element;
+          var req = new XMLHttpRequest();
+          req.open("POST", '/sdupload', true);
+          req.upload.onprogress = function(evt) {
+            if (evt.loaded > 0) {
+              prgbar.style.display = 'inline';
+              prgbar.value = evt.loaded / evt.total * 100;
+            }
+            else if (evt.loaded >= evt.total)
+              prgbar.style.display = 'none';
+          };
+          req.onreadystatechange = function() {
+            ready_state_change(req, function() {
+              refresh_sd_file_list();
+              prgbar.style.display = 'none';
+            });
+          };
+          req.send(formData);
+        }
+
         function del_file(id) {
           var file = $("#f" + id).element.firstChild.nextSibling.innerHTML;
           send_gcode('M30 ' + file, function(resp) {
@@ -92,7 +131,7 @@
         }
 
         function print_file(id) {
-          var file = $("#f1").element.firstChild.nextSibling.innerHTML;
+          var file = $("#f" + id).element.firstChild.nextSibling.innerHTML;
           send_gcode('M23 ' + file, function(resp) { send_gcode('M24'); });
         }
 
@@ -101,16 +140,18 @@
           cmds.element.scrollTop = cmds.element.scrollHeight;
         }
 
-        function add_resp(cmd) {
-          cmds.append('<p class="gr">' + cmd + '</p>');
+        function add_resp(resp) {
+          var msgs = resp.split('\n').join('<br>');
+          cmds.append('<p class="gr">' + msgs + '</p>');
           cmds.element.scrollTop = cmds.element.scrollHeight;
         }
 
         function send_gcode(cmd, success) {
-          var ncmd = "N{0} {1}".format(gcode_n, cmd);
-          var checksum = [...ncmd].reduce((x,y) => x ^ y.charCodeAt(0), 0);
-          ncmd += "*" + checksum;
-          gcode_n++;
+          //var ncmd = "N{0} {1}".format(gcode_n, cmd);
+          //var checksum = [...ncmd].reduce((x,y) => x ^ y.charCodeAt(0), 0);
+          //ncmd += "*" + checksum;
+          //gcode_n++;
+          var ncmd = cmd;
           add_cmd(ncmd);
           request("/gcode?cmd=" + ncmd, function(resp) {
             add_resp(resp);
@@ -184,7 +225,7 @@
         <div class="cnt">
           <div class="dline">
             <button class="ibtn home">Home all</button>
-            <button class="ibtn stop" onclick="send_gcode('M28');">Stop motors</button>
+            <button class="ibtn stop" onclick="send_gcode('M18');">Stop motors</button>
           </div>
           <div class="dline" id="xmov">
             <p>X</p>
@@ -217,6 +258,19 @@
             <button class="movbtn" value="Z10">10</button>
           </div>
           <div class="dline">
+            <datalist id="fansteplist">
+              <option>0</option>
+              <option>10</option>
+              <option>20</option>
+              <option>30</option>
+              <option>40</option>
+              <option>50</option>
+              <option>60</option>
+              <option>70</option>
+              <option>80</option>
+              <option>90</option>
+              <option>100</option>
+            </datalist>
             <datalist id="steplist">
               <option>0</option>
               <option>25</option>
@@ -240,9 +294,9 @@
               onchange="send_gcode('M221 S' + flowin.value);"></input>
             <label>Fan:</label>
             <output id="fanout">100%</output>
-            <input id="fanin" type="range" step="1" min="0" max="200" value="100" list="steplist"
+            <input id="fanin" type="range" step="1" min="0" max="100" value="50" list="fansteplist"
               oninput="fanout.value = fanin.value + '%';"
-              onchange="send_gcode('M106 S' + fanin.value);"></input>
+              onchange="send_gcode('M106 S' + Math.trunc(fanin.value/100*255));"></input>
             <button class="ibtn off" style="float: right" onclick="send_gcode('M107');"></button>
           </div>
         </div>
@@ -256,7 +310,8 @@
         <div class="title">Files</div>
         <div class="cnt">
           <label class="customfileinput ibtn" for="sdfile">Upload to SD</label>
-          <input id="sdfile" type="file" name="name" onchange="alert(sdfile.value);">
+          <input id="sdfile" type="file" name="name" onchange="upload_sd_file(sdfile.value);">
+          <progress id="prgbar" style="display: none; width: 60px; float: left; margin-right: 5px; " value="0" max="100"></progress>
           <button id="refresh" class="ibtn refresh" onclick="refresh_sd_file_list();"></button>
           <table id="sd_files">
             <thead>

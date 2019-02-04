@@ -12,17 +12,21 @@ static const char *error_msg_invalid_fmt = "Invalid json format in /config.json"
 ESP8266WebServer server(80);    // Create a webserver object that listens for HTTP request on port 80
 File fsUploadFile;              // File object to temporary receive a file
 
+static uint32_t gcode_cur_lineno = 1; // last gcode line sent
+
 String getContentType(String filename); // convert the file extension to the MIME type
 bool handleFileRead(String path);       // send the right file to the client (if it exists)
 void handleFileUpload();                // upload a new file to the SPIFFS]
 void handleGcode();
+void handleOutOfBandMessage();
+void handleSdUpload();
 
 void serial_message(const char *msg, const char *value = NULL) {
   Serial.print("M117 ");
   Serial.print(msg);
   if (value)
     Serial.print(value);
-  Serial.println(";");
+  Serial.println("\n");
 }
 
 void fallback_serial_error(const char *error_msg) {
@@ -116,6 +120,13 @@ void setup() {
   );
 
   server.on("/gcode", HTTP_GET, handleGcode);
+  server.on("/msg", HTTP_GET, handleOutOfBandMessage);
+
+  server.on("/sdupload", HTTP_POST, [](){
+    server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    server.sendHeader("Content-type", "text/plain");
+    server.send(200); },
+    handleSdUpload);
 
   server.onNotFound([]() {                              // If the client requests any URI
     if (!handleFileRead(server.uri()))                  // send it if it exists
@@ -162,17 +173,10 @@ bool handleFileRead(String path) {
   return false;
 }
 
-void handleGcode() {
-  String cmd = server.arg("cmd");
-  Serial.write(cmd.c_str());
-  Serial.write('\n');
-  Serial.flush();
-
+void handleOutOfBandMessage() {
   server.setContentLength(CONTENT_LENGTH_UNKNOWN);
   server.sendHeader("Content-type", "text/plain");
   server.send(200);
-
-  int timeout = 300;
   do {
     size_t len = Serial.available();
     if (len > 0) {
@@ -180,12 +184,109 @@ void handleGcode() {
       Serial.readBytes(buf, len);
       buf[len] = 0;
       server.sendContent(buf);
+    }
+    else
+      break;
+  } while (true);
+}
+
+String send_gcode(const char *cmd, bool waitresp = true) {
+  String resp;
+
+  char lineno[20];
+  sprintf(lineno, "N%d ", gcode_cur_lineno);
+
+  // compute checksum
+  int checksum = 0;
+  int i = 0;
+  while(lineno[i]) {
+    checksum ^= lineno[i];
+    i++;
+  }
+  i = 0;
+  while(cmd[i]) {
+    checksum ^= cmd[i];
+    i++;
+  }
+  char chksumstr[20];
+  sprintf(chksumstr, "*%d\n", checksum);
+
+  // check pending messages
+  size_t plen = Serial.available();
+  if (plen > 0) {
+    char buff[plen+1];
+    Serial.readBytes(buff, plen);
+    resp.concat(buff);
+  }
+
+  // send command
+  Serial.write(lineno);
+  Serial.write(cmd);
+  Serial.write(chksumstr);
+  Serial.flush();
+
+  //debug
+  /*server.sendContent(lineno);
+  server.sendContent(cmd);
+  server.sendContent(chksumstr);*/
+
+  #define TIMEOUT_READ 200 // ~ 1s
+  int timeout = TIMEOUT_READ;
+  char last = 0;
+  int exitst = 0;
+  do {
+    size_t len = Serial.available();
+    if (len > 0) {
+      char buf[len+1];
+      buf[len] = 0;
+
+      for(size_t i = 0; i < len; i++) {
+        buf[i] = Serial.read();
+
+        // identify message end
+        if (buf[i] == ':') exitst = 5; // : identify a message from the firmware, wait for a '\n'
+        else if (exitst == 0) {
+          if ((last == 'o' && buf[i] == 'k')
+            ||(last == '!' && buf[i] == '!')
+            ||(last == 'r' && buf[i] == 's')) exitst = 1;
+        }
+        else if (exitst == 5) {
+          if (buf[i] == '\n') exitst = 0;
+        }
+        else if (exitst == 1) {
+          if (buf[i] == '\n') {
+            buf[i+1] = 0;
+            exitst = 2;
+            break;
+          }
+        }
+        last = buf[i];
+      }
+      resp.concat(buf);
+      if (exitst == 2) break;
+      timeout = TIMEOUT_READ;
     } else {
-      delay(10);
+      if (!waitresp)
+        break;
+      delay(5);
       if (--timeout == 0) // timeout
         break;
     }
   } while (true);
+
+  if (!(resp.indexOf("Error:") > 0 || resp.indexOf("Resend:") > 0))
+    gcode_cur_lineno++;
+
+  return resp;
+}
+
+void handleGcode() {
+  String cmd = server.arg("cmd");
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.sendHeader("Content-type", "text/plain");
+  server.send(200);
+  String resp = send_gcode(cmd.c_str());
+  server.sendContent(resp);
 }
 
 void handleFileUpload() {
@@ -214,5 +315,91 @@ void handleFileUpload() {
     } else {
       server.send(500, "text/plain", "500: couldn't create file");
     }
+  }
+}
+
+void handleSdUpload() {
+  // upload a new file to Printer SD CARD
+  #define MAX_BUF_LINE 512
+  static char buffer_line[MAX_BUF_LINE];
+  static size_t buffer_pos = 0;
+  static bool is_comment = false;
+  static bool error = false;
+
+  HTTPUpload& upload = server.upload();
+  if (upload.status == UPLOAD_FILE_START) {
+    String filename = upload.filename;
+    if (!filename.startsWith("/"))
+      filename = "/" + filename;
+
+    buffer_pos = 0;
+    buffer_line[0] = 0;
+    is_comment = false;
+    error = false;
+
+    String cmd = "M28 ";
+    cmd += filename;
+    String response = send_gcode(cmd.c_str());
+    server.sendContent(response);
+    if (response.indexOf("Error:") > 0) {
+      server.send(500, "text/plain", response);
+      error = true;
+    }
+
+  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    if (error) return;
+
+    for(size_t i = 0; i < upload.currentSize; i++) {
+      if (upload.buf[i] == '\r') { // dos files have \r, ignore!
+        continue;
+      }
+
+      char c = upload.buf[i];
+      buffer_line[buffer_pos] = c;
+
+      if (c == '\n') { // end of command detected
+        if (buffer_pos > 0) {
+          buffer_line[buffer_pos] = 0;
+          buffer_pos = 0;
+          String response = send_gcode(buffer_line);
+          //server.sendContent(response);
+          if (response.indexOf("Error:") > 0) {
+            server.send(500, "text/plain", response);
+            error = true;
+            break;
+          }
+        }
+        is_comment = false;
+        continue;
+      }
+      else if (c == ';') { // comment
+        is_comment = true;
+      }
+
+      if (!is_comment)
+        buffer_pos++;
+
+      if (buffer_pos >= MAX_BUF_LINE) {
+        buffer_line[MAX_BUF_LINE-1] = 0;
+        String msg = "500: command exceeded buffer length around: ";
+        msg.concat(buffer_line);
+        server.send(500, "text/plain", msg);
+        error = true;
+        break;
+      }
+    }
+
+  } else if (upload.status == UPLOAD_FILE_END) {
+    if (error) return;
+
+    if (buffer_pos > 0) { // last line, if it don't has '\n'
+      buffer_line[buffer_pos] = 0;
+      String response = send_gcode(buffer_line);
+      if (response.indexOf("Error:") > 0)
+        server.send(500, "text/plain", response);
+    }
+    String response = send_gcode("M29");
+    server.sendContent(response);
+    serial_message("Up. ended: ", String(upload.totalSize).c_str());
   }
 }
