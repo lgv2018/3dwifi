@@ -320,8 +320,11 @@ void handleFileUpload() {
 
 void handleSdUpload() {
   // upload a new file to Printer SD CARD
-  #define MAX_BUF_LINE 512
-  static char buffer_line[MAX_BUF_LINE];
+
+  // max cmd size (default from Marlin, Configuration_adv.h)
+  #define MAX_CMD_SIZE 96
+
+  static char buffer_line[MAX_CMD_SIZE];
   static size_t buffer_pos = 0;
   static bool is_comment = false;
   static bool error = false;
@@ -350,18 +353,14 @@ void handleSdUpload() {
     if (error) return;
 
     for(size_t i = 0; i < upload.currentSize; i++) {
-      if (upload.buf[i] == '\r') { // dos files have \r, ignore!
-        continue;
-      }
-
       char c = upload.buf[i];
-      buffer_line[buffer_pos] = c;
 
-      if (c == '\n') { // end of command detected
+      if (c == '\n' || c == '\r') { // end of command detected
+        is_comment = false;
         if (buffer_pos > 0) {
           buffer_line[buffer_pos] = 0;
           buffer_pos = 0;
-          String response = send_gcode(buffer_line);
+          String response = send_gcode(buffer_line, false);
           //server.sendContent(response);
           if (response.indexOf("Error:") > 0) {
             server.send(500, "text/plain", response);
@@ -369,23 +368,14 @@ void handleSdUpload() {
             break;
           }
         }
-        is_comment = false;
-        continue;
       }
-      else if (c == ';') { // comment
-        is_comment = true;
+      else if (buffer_pos >= MAX_CMD_SIZE - 1) {
+        // ignore characters beyond MAX_CMD_SIZE
       }
-
-      if (!is_comment)
-        buffer_pos++;
-
-      if (buffer_pos >= MAX_BUF_LINE) {
-        buffer_line[MAX_BUF_LINE-1] = 0;
-        String msg = "500: command exceeded buffer length around: ";
-        msg.concat(buffer_line);
-        server.send(500, "text/plain", msg);
-        error = true;
-        break;
+      else {
+        if (c == ';') is_comment = true;
+        if (!is_comment)
+          buffer_line[buffer_pos++] = c;
       }
     }
 
