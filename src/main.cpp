@@ -324,31 +324,43 @@ void handleFileUpload() {
   }
 }
 
-int sendBuffer(const uint8_t *buffer_line, size_t buffer_pos) {
+#define MAX_RAW_SIZE 512 // need to be <= than printer raw size
+#define EOT 4
+#define ACK 6
+#define NCK 21
+#define ETB 23
+#define CAN 24
+
+char sendBuffer(const char *buffer_line, size_t len, int *retrans) {
   int i = 10;
   do {
-    Serial.write(buffer_line, buffer_pos);
-    char resp[3];
-    size_t len;
-    while ((len = Serial.available()) < 3); // wait for 3 chars
-    Serial.readBytes(resp, 3);
-    if (strncmp(resp, "ok\n", 3))
-      return 1;
+    Serial.write((const uint8_t*)buffer_line, len);
+    // wait for resp
+    int j = 1000;
+    while (Serial.available() < 1) {
+      delay(5);
+      j--;
+      if (j == 0) return NCK;
+    }
+
+    char resp = Serial.read();
+    if (resp != NCK)
+      return resp;
+
+    (*retrans)++;
   } while (i--);
-  return 0;
+  return NCK;
 }
 
 void handleSdUpload() {
   // upload a new file to Printer SD CARD
 
-  // max cmd size (default from Marlin = 96, Configuration_adv.h)
-  #define MAX_CMD_SIZE 256
-
-  static uint8_t buffer_line[MAX_CMD_SIZE+3];
-  static size_t buffer_pos = 0;
-  //static bool is_comment = false;
-  static bool error = false;
-  static char chksum = 0;
+  static char buffer_line[MAX_RAW_SIZE+2];
+  static size_t buffer_pos;
+  static char resp;
+  static char chksum;
+  static long start;
+  static int error_count;
 
   HTTPUpload& upload = server.upload();
   if (upload.status == UPLOAD_FILE_START) {
@@ -358,32 +370,33 @@ void handleSdUpload() {
 
     chksum = 0;
     buffer_pos = 0;
-    buffer_line[0] = 0;
-    //is_comment = false;
-    error = false;
+    resp = ACK;
+    error_count = 0;
+    start = millis();
 
     String cmd = "M28 !"; // ! indicates raw transfer
     cmd += filename;
     String response = send_gcode(cmd.c_str());
     server.sendContent(response);
     if (response.indexOf("Error:") >= 0 ||
-        response.indexOf("fail ") >= 0) {
-      server.send(500, "text/plain", response);
-      error = true;
+        response.indexOf("failed") >= 0) {
+      server.sendContent(response);
+      resp = CAN;
     }
 
   } else if (upload.status == UPLOAD_FILE_WRITE) {
-    if (error) return;
+    if (resp != ACK) return;
 
     for(size_t i = 0; i < upload.currentSize; i++) {
       char c = upload.buf[i];
       buffer_line[buffer_pos++] = c;
       chksum ^= c;
-      if (buffer_pos == MAX_CMD_SIZE) {
-        buffer_line[buffer_pos++] = 0;
+      if (buffer_pos == MAX_RAW_SIZE) {
+        buffer_line[buffer_pos++] = ETB; // end of block
         buffer_line[buffer_pos++] = chksum;
-        if (!sendBuffer(buffer_line, buffer_pos)) {
-          error = true;
+        resp = sendBuffer(buffer_line, buffer_pos, &error_count);
+        if (resp != ACK) {
+          server.sendContent("Error sending block.");
           break;
         }
         buffer_pos = 0;
@@ -391,52 +404,39 @@ void handleSdUpload() {
       }
     }
 
-    /* GCODE SENDING
-    for(size_t i = 0; i < upload.currentSize; i++) {
-      char c = upload.buf[i];
-
-      if (c == '\n' || c == '\r') { // end of command detected
-        is_comment = false;
-        if (buffer_pos > 0) {
-          buffer_line[buffer_pos] = 0;
-          buffer_pos = 0;
-          String response = send_gcode(buffer_line);
-          //server.sendContent(response);
-          if (response.indexOf("Error:") >= 0) {
-            server.send(500, "text/plain", response);
-            error = true;
-            break;
-          }
-        }
-      }
-      else if (buffer_pos >= MAX_CMD_SIZE - 1) {
-        // ignore characters beyond MAX_CMD_SIZE
-      }
-      else {
-        if (c == ';') is_comment = true;
-        if (!is_comment)
-          buffer_line[buffer_pos++] = c;
-      }
-    }*/
-
   } else if (upload.status == UPLOAD_FILE_END) {
-    if (!error) {
-      if (buffer_pos > 0) {
-        buffer_line[buffer_pos++] = 0;
-        buffer_line[buffer_pos++] = chksum;
-      }
-      buffer_line[buffer_pos++] = 1;
-      if (!sendBuffer(buffer_line, buffer_pos))
-        server.send(500, "text/plain", "Error sending last chunk.");
-
-/*      buffer_line[buffer_pos] = 0;
-      String response = send_gcode(buffer_line);
-      if (response.indexOf("Error:") >= 0)
-        server.send(500, "text/plain", response);*/
+    if (resp == ACK && buffer_pos > 0) {
+      buffer_line[buffer_pos++] = ETB;
+      buffer_line[buffer_pos++] = chksum;
+      resp = sendBuffer(buffer_line, buffer_pos, &error_count);
+      if (resp != ACK)
+        server.sendContent("Error sending last block.");
     }
-    // send M29 even if an error occurred while uploading
-    String response = send_gcode("M29");
-    server.sendContent(response);
-    serial_message("Up. ended: ", String(upload.totalSize).c_str());
+
+    bool success = resp == ACK;
+
+    if (resp != EOT && resp != CAN) { // the printer is still running the protocol, finish it
+      buffer_pos = 0;
+      buffer_line[buffer_pos++] = EOT; // end of transmission
+      resp = sendBuffer(buffer_line, buffer_pos, &error_count);
+      if (resp != EOT) { // end transmission not ok
+        server.sendContent("Error finishing transmission. Reset printer!");
+      }
+    }
+
+    // send transmission feedback to printer and browser
+    long lsecs = (millis() - start) / 1000;
+    int mins = lsecs / 60;
+    int secs = lsecs % 60;
+    sprintf(buffer_line, "Errors: %d\nTime: %d:%d\nStatus: %s!\n",
+      error_count, mins, secs, success ? "Success" : "Failed");
+    if (success) {
+      serial_message("SD upload successed: ", String(upload.totalSize).c_str());
+      server.sendContent(String(buffer_line));
+    }
+    else {
+      serial_message("SD upload failed.");
+      server.sendContent(String(buffer_line));
+    }
   }
 }

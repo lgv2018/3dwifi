@@ -56,12 +56,14 @@
         function ready_state_change(req, onsuccess, onfail) {
           if (req.readyState === 4) {
             if (req.status === 200) {
-              onsuccess(req.responseText);
-            } else if (!onfail){
+              onsuccess(req);
+            } else {
               if (req.responseText == '' && req.status == 0)
                 show_alert('Timeout.');
-              else
+              else if (!onfail)
                 show_alert(req.responseText);
+              else
+                onfail(req);
             }
           }
         }
@@ -74,11 +76,11 @@
         }
 
         function refresh_sd_file_list() {
-          send_gcode('M21', function(resp) {
-            send_gcode('M20', function(resp) {
+          send_gcode('M21', function(req) {
+            send_gcode('M20', function(req) {
               var tbody = $('#sd_files > tbody');
               tbody.html('');
-              var files = resp.replace(/\r/g, '').split('\n');
+              var files = req.responseText.replace(/\r/g, '').split('\n');
               // first line = Begin file list
               // last 2 lines = End file list \n ok \n
               for (var i = 1; i < files.length - 3; i++) {
@@ -93,46 +95,68 @@
                     </td>
                   </tr>`.format(i, columns[0], fileSizeSI(parseInt(columns[1]))));
               }
-            });
+            }, true);
           });
         }
 
         function upload_sd_file(filename) {
+          var start = new Date().getTime();
+          var sdfile = $("#sdfile").element;
           filename = filename.split(/(\\|\/)/g).pop();
+
+          // filename to 8.3 format
+          arr = filename.replace(/ /g, '').split('.');
+          if (arr.length == 1) arr[1] = 'g';
+          filename = arr[0].substr(-8) + '.' + arr[1].substr(0, 3);
+
           var formData = new FormData();
           formData.append('filename', filename);
-          formData.append('file', $("#sdfile").element.files[0]);
+          formData.append('file', sdfile.files[0], filename);
 
           var prgbar = $("#prgbar").element;
+          var etap = $("#eta").element;
           var req = new XMLHttpRequest();
           req.open("POST", '/sdupload', true);
           req.upload.onprogress = function(evt) {
             if (evt.loaded > 0) {
+              var prg = evt.loaded / evt.total;
               prgbar.style.display = 'inline';
-              prgbar.value = evt.loaded / evt.total * 100;
+              prgbar.value = prg * 100;
+              var elapsed = new Date().getTime() - start;
+              var eta = new Date((elapsed / prg) - elapsed);
+              etap.innerHTML = "ETA: {0}:{1}:{2}".format(
+                eta.getUTCHours(), eta.getUTCMinutes(), eta.getUTCSeconds());
+              etap.style.display = 'inline';
             }
-            else if (evt.loaded >= evt.total)
-              prgbar.style.display = 'none';
           };
           req.onreadystatechange = function() {
-            ready_state_change(req, function() {
+            var on_end = function(req) {
+              var msg = req.responseText;
+              msg = msg.substring(0, msg.indexOf('HTTP/'))
+              add_resp(msg);
               refresh_sd_file_list();
               prgbar.style.display = 'none';
-            });
+              etap.style.display = 'none';
+            };
+            ready_state_change(req, on_end, on_end);
           };
           req.send(formData);
+          sdfile.value = "";
+          add_cmd("Raw upload " + filename);
         }
 
         function del_file(id) {
           var file = $("#f" + id).element.firstChild.nextSibling.innerHTML;
-          send_gcode('M30 ' + file, function(resp) {
+          send_gcode('M30 ' + file, function(req) {
             $("#sd_files").element.deleteRow($("#f" + id).element.rowIndex);
           });
         }
 
         function print_file(id) {
           var file = $("#f" + id).element.firstChild.nextSibling.innerHTML;
-          send_gcode('M23 ' + file, function(resp) { send_gcode('M24'); });
+          send_gcode('M23 ' + file, function(req) {
+            send_gcode('M24');
+          });
         }
 
         function add_cmd(cmd) {
@@ -146,16 +170,19 @@
           cmds.element.scrollTop = cmds.element.scrollHeight;
         }
 
-        function send_gcode(cmd, success) {
+        function send_gcode(cmd, onsuccess, skip_cmd_add) {
           //var ncmd = "N{0} {1}".format(gcode_n, cmd);
           //var checksum = [...ncmd].reduce((x,y) => x ^ y.charCodeAt(0), 0);
           //ncmd += "*" + checksum;
           //gcode_n++;
           var ncmd = cmd;
-          add_cmd(ncmd);
-          request("/gcode?cmd=" + ncmd, function(resp) {
-            add_resp(resp);
-            if (success) success(resp);
+          if (!skip_cmd_add)
+            add_cmd(ncmd);
+          request("/gcode?cmd=" + ncmd, function(req) {
+            if (!skip_cmd_add)
+              add_resp(req.responseText);
+            if (onsuccess)
+              onsuccess(req);
           });
         }
       </script>
@@ -312,6 +339,7 @@
           <label class="customfileinput ibtn" for="sdfile">Upload to SD</label>
           <input id="sdfile" type="file" name="name" onchange="upload_sd_file(sdfile.value);">
           <progress id="prgbar" style="display: none; width: 60px; float: left; margin-right: 5px; " value="0" max="100"></progress>
+          <p id="eta" style="display: none; float: left; margin-right: 5px; "></p>
           <button id="refresh" class="ibtn refresh" onclick="refresh_sd_file_list();"></button>
           <table id="sd_files">
             <thead>
