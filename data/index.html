@@ -7,6 +7,10 @@
         var alertdiv;
         var cmds;
         var gcode_n = 0;
+        var svgchart;
+        var svgpnts_bed;
+        var svgpnts_estop;
+        var tiptext;
 
         function init() {
           var cmd = $('#cmd');
@@ -32,9 +36,68 @@
           $('#clear').on('click', function() { cmds.html(''); });
           $('#cmd').on('keyup', function(event) { if (event.key == 'Enter') { send.element.click(); }});
 
+          // temperature
+          svgchart = $('#tempchart').element;
+          polybed = $('#polybed').element;
+          polyestop = $('#polyestop').element;
+          svgpnts_estop = polyestop.points;
+          svgpnts_bed = polybed.points;
+          tippt = svgchart.createSVGPoint();
+          tiprect = $('#tooltiprect').element;
+          tiptext = $('#tooltiptext').element;
+          var tipover = function(evt) {
+            tippt.x = evt.clientX;
+      		  tippt.y = evt.clientY;
+            var mpt = tippt.matrixTransform(svgchart.getScreenCTM().inverse());
+            var pt = evt.target.getPointAtLength(mpt.x);
+            tiptext.setAttributeNS(null, "x", mpt.x - 40);
+            tiptext.setAttributeNS(null, "y", mpt.y - 17);
+            tiprect.setAttributeNS(null, "x", mpt.x -45);
+            tiprect.setAttributeNS(null, "y", mpt.y - 35);
+            tiptext.innerHTML = (60 - (pt.x / 7)).toFixed(0) + 's: ' + (300 - pt.y).toFixed(1) + 'ºC';
+            tiptext.style.visibility = 'visible';
+            tiprect.style.visibility = 'visible';
+          };
+          var tipout = function(evt) {
+            setTimeout(function() {
+              tiptext.style.visibility = 'hidden';
+              tiprect.style.visibility = 'hidden';
+            }, 1000);
+          }
+          polybed.onmousemove = tipover;
+          polyestop.onmousemove = tipover;
+          polybed.onmouseover = tipover;
+          polyestop.onmouseover = tipover;
+          polybed.onmouseout = tipout;
+          polyestop.onmouseout = tipout;
+
+          setTimeout(updateTemperature, 1000);
           //readOutOfBangMessage();
           // call M110 handshaking
           //send_gcode('M110');
+        }
+
+        var tbed = 50;
+        var testop = 90;
+        function updateTemperature() {
+          tbed += Math.random() * 4 - 2;
+          var b = svgchart.createSVGPoint();
+          b.x = 420; b.y = 300 - tbed;
+
+          testop += Math.random() * 10 - 5;
+          var e = svgchart.createSVGPoint();
+          e.x = 420; e.y = 300 - testop;
+
+          for(i=0; i < svgpnts_bed.numberOfItems; i++) svgpnts_bed.getItem(i).x -= 7;
+          for(i=0; i < svgpnts_estop.numberOfItems; i++) svgpnts_estop.getItem(i).x -= 7;
+
+          svgpnts_bed.appendItem(b);
+          svgpnts_estop.appendItem(e);
+
+          while(svgpnts_bed.getItem(0).x < 0) svgpnts_bed.removeItem(0);
+          while(svgpnts_estop.getItem(0).x < 0) svgpnts_estop.removeItem(0);
+
+          setTimeout(updateTemperature, 500);
         }
 
         function readOutOfBangMessage() {
@@ -242,6 +305,22 @@
           width: 100%;
           box-sizing: border-box;
         }
+        .graph { height: 200px; width: 300px; font-size: 30px;}
+        .graph .grid {
+          stroke: #777;
+          stroke-dasharray: 0;
+          stroke-width: 1;
+        }
+        .label-title {
+          font-weight: bold;
+          fill: black;
+        }
+        .y-grid text {
+          text-anchor: end;
+        }
+        g text,
+        svg text { font-size: 17px; }
+        polyline { stroke-width: 2; }
       </style>
     </head>
     <body onload="init()">
@@ -331,6 +410,46 @@
       <div class="container">
         <div class="title">Temperature</div>
         <div class="cnt">
+          <svg id="tempchart" class="graph" viewbox="0 -40 450 360" width="100%">
+            <defs>
+              <filter id="f1" width="300%" height="300%">
+                <feOffset result="offOut" in="SourceGraphic" dx="0" dy="0" />
+                <feGaussianBlur result="blurOut" in="offOut" stdDeviation="4" />
+                <feBlend in="SourceGraphic" in2="blurOut" mode="normal" />
+              </filter>
+            </defs>
+            <g style="text-anchor: end">
+              <rect x="430" y="-15" width="20" height="20" fill="#F48024" stroke="black" />
+              <text x="420" y="0">Bed</text>
+              <rect x="430" y="10" width="20" height="20" fill="#905" stroke="black" />
+              <text x="420" y="25">Nozzle</text>
+            </g>
+            <g class="grid y-grid">
+              <line x1="0" x2="0" y1="-10" y2="300"></line>
+              <text x="7" y="-20" class="label-title">ºC</text>
+              <text x="-10" y="250">50</text>
+              <text x="-10" y="200">100</text>
+              <text x="-10" y="150">150</text>
+              <text x="-10" y="100">200</text>
+              <text x="-10" y="50">250</text>
+              <text x="-10" y="0">300</text>
+            </g>
+            <g class="grid x-grid">
+              <line x1="0" x2="430" y1="300" y2="300"></line>
+              <text x="440" y="305" class="label-title">s</text>
+              <text x="0" y="320">-60</text>
+              <text x="70" y="320">-50</text>
+              <text x="140" y="320">-40</text>
+              <text x="210" y="320">-30</text>
+              <text x="280" y="320">-20</text>
+              <text x="350" y="320">-10</text>
+              <text x="420" y="320">0</text>
+            </g>
+            <polyline id='polybed' fill='none' stroke='#F48024' filter="url(#f1)"/>
+            <polyline id='polyestop' fill='none' stroke='#905' filter="url(#f1)"/>
+            <rect id='tooltiprect' style="visibility: hidden" x="0" y="0" fill='white' stroke='black' width='120' height='25'/>
+            <text id='tooltiptext' style="visibility: hidden" x="0" y="0" />
+          </svg>
         </div>
       </div>
       <div class="container">
