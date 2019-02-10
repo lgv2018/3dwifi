@@ -177,11 +177,17 @@ void handleOutOfBandMessage() {
   server.setContentLength(CONTENT_LENGTH_UNKNOWN);
   server.sendHeader("Content-type", "text/plain");
   server.send(200);
+  bool last_is_eol = true;
   do {
     size_t len = Serial.available();
-    if (len > 0) {
+    if (len == 0 && !last_is_eol) {
+      delay(5);
+      continue;
+    }
+    else if (len > 0) {
       char buf[len+1];
       Serial.readBytes(buf, len);
+      last_is_eol = buf[len-1] == '\n';
       buf[len] = 0;
       server.sendContent(buf);
     }

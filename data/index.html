@@ -11,12 +11,22 @@
         var svgpnts_bed;
         var svgpnts_estop;
         var tiptext;
+        var targetbed;
+        var targetestop;
+        var enabletemp;
+        var pduration;
+        var sd_printing = false;
+        var gcode_lock = false;
+        var lasttemp_time = new Date().getTime();
+        var start_sd_print_date = null;
 
         function init() {
           var cmd = $('#cmd');
           var send = $('#send');
           alertdiv = $('#alertdiv');
           cmds = $('#cmds');
+          enabletemp = $('#enabletemp').element;
+
           $('.movbtn').foreach(function(i, elem) {
             $(elem).on('click', function() {
               send_gcode('G0 ' + elem.value);
@@ -42,28 +52,11 @@
           polyestop = $('#polyestop').element;
           svgpnts_estop = polyestop.points;
           svgpnts_bed = polybed.points;
+          targetbed = $('#targetbed').element;
+          targetestop = $('#targetestop').element;
           tippt = svgchart.createSVGPoint();
           tiprect = $('#tooltiprect').element;
           tiptext = $('#tooltiptext').element;
-          var tipover = function(evt) {
-            tippt.x = evt.clientX;
-      		  tippt.y = evt.clientY;
-            var mpt = tippt.matrixTransform(svgchart.getScreenCTM().inverse());
-            var pt = evt.target.getPointAtLength(mpt.x);
-            tiptext.setAttributeNS(null, "x", mpt.x - 40);
-            tiptext.setAttributeNS(null, "y", mpt.y - 17);
-            tiprect.setAttributeNS(null, "x", mpt.x -45);
-            tiprect.setAttributeNS(null, "y", mpt.y - 35);
-            tiptext.innerHTML = (60 - (pt.x / 7)).toFixed(0) + 's: ' + (300 - pt.y).toFixed(1) + 'ºC';
-            tiptext.style.visibility = 'visible';
-            tiprect.style.visibility = 'visible';
-          };
-          var tipout = function(evt) {
-            setTimeout(function() {
-              tiptext.style.visibility = 'hidden';
-              tiprect.style.visibility = 'hidden';
-            }, 1000);
-          }
           polybed.onmousemove = tipover;
           polyestop.onmousemove = tipover;
           polybed.onmouseover = tipover;
@@ -71,43 +64,179 @@
           polybed.onmouseout = tipout;
           polyestop.onmouseout = tipout;
 
-          setTimeout(updateTemperature, 1000);
-          //readOutOfBangMessage();
-          // call M110 handshaking
-          //send_gcode('M110');
+          setTimeout(readOutOfBangMessage, 1000);
+
+          pduration = $('#pduration').element;
+          send_gcode("M27 S10"); // monitor sd printing progress
         }
 
-        var tbed = 50;
-        var testop = 90;
-        function updateTemperature() {
-          tbed += Math.random() * 4 - 2;
-          var b = svgchart.createSVGPoint();
-          b.x = 420; b.y = 300 - tbed;
+        function agePrintDuration() {
+            if (start_sd_print_date != null) {
+              timespan = new Date(new Date().getTime() - start_sd_print_date.getTime());
+              hour = timespan.getUTCHours().toString().padStart(2,'0');
+              min = timespan.getUTCMinutes().toString().padStart(2,'0');
+              sec = timespan.getUTCSeconds().toString().padStart(2,'0');
+              if (timespan.getUTCDate() > 1)
+                pduration.innerHTML = '{0}d {1}:{2}:{3}'.format(timespan.getUTCDate()-1, hour, min, sec);
+              else
+                pduration.innerHTML = '{0}:{1}:{2}'.format(hour, min, sec);
+            }
+        }
 
-          testop += Math.random() * 10 - 5;
-          var e = svgchart.createSVGPoint();
-          e.x = 420; e.y = 300 - testop;
+        function tipover(evt) {
+          tippt.x = evt.clientX;
+          tippt.y = evt.clientY;
+          var mpt = tippt.matrixTransform(svgchart.getScreenCTM().inverse());
+          mpt.x -= 5; // viewBox minX
 
-          for(i=0; i < svgpnts_bed.numberOfItems; i++) svgpnts_bed.getItem(i).x -= 7;
-          for(i=0; i < svgpnts_estop.numberOfItems; i++) svgpnts_estop.getItem(i).x -= 7;
+          var i = evt.target.points.numberOfItems-1;
+          var pt = evt.target.points.getItem(i);
+          while(i >= 0 && evt.target.points.getItem(i).x > mpt.x) {
+            pt = evt.target.points.getItem(i);
+            i--;
+          }
 
-          svgpnts_bed.appendItem(b);
-          svgpnts_estop.appendItem(e);
+          tiptext.setAttribute("x", mpt.x -40);
+          tiptext.setAttribute("y", mpt.y -27);
+          tiprect.setAttribute("x", mpt.x -45);
+          tiprect.setAttribute("y", mpt.y -45);
+          tiptext.innerHTML = (60 - (pt.x / 7)).toFixed(0) + 's: ' + (300 - pt.y).toFixed(1) + 'ºC';
+          tiptext.style.visibility = 'visible';
+          tiprect.style.visibility = 'visible';
+        };
 
-          while(svgpnts_bed.getItem(0).x < 0) svgpnts_bed.removeItem(0);
-          while(svgpnts_estop.getItem(0).x < 0) svgpnts_estop.removeItem(0);
+        function tipout(evt) {
+          setTimeout(function() {
+            tiptext.style.visibility = 'hidden';
+            tiprect.style.visibility = 'hidden';
+          }, 1000);
+        }
 
-          setTimeout(updateTemperature, 500);
+        function setUpdateTemperature() {
+          if (!enabletemp.checked)
+            send_gcode("M155 S0");
+          else
+            send_gcode("M155 S3");
+        }
+
+        function parseAndAddTemperature(reqtime, msg) {
+          // age actual data
+          var now = new Date().getTime();
+          var spassed = ((now-lasttemp_time) / 1000).toFixed(0);
+          for(i=0; i < svgpnts_bed.numberOfItems; i++) svgpnts_bed.getItem(i).x -= spassed*7;
+          for(i=0; i < svgpnts_estop.numberOfItems; i++) svgpnts_estop.getItem(i).x -= spassed*7;
+          lasttemp_time = now;
+
+          // how old is actual response
+          var spassed = ((now-reqtime) / 1000).toFixed(0);
+          var actualx = 420 - spassed * 7;
+
+          // ok T:68.76 /190.00 B:29.47 /60.00 @:127 B@:127\n
+          temps = msg.match(/T:(\d+.\d+) ?\/(\d+.\d+)/)
+          if (temps && temps.length > 1) {
+            testop = temps[1]
+            targetestop.setAttribute('y1', 300 - temps[2]);
+            targetestop.setAttribute('y2', 300 - temps[2]);
+            var p = svgchart.createSVGPoint();
+            p.x = actualx; p.y = 300 - testop;
+            svgpnts_estop.appendItem(p);
+          }
+
+          temps = msg.match(/B:(\d+.\d+) ?\/(\d+.\d+)/)
+          if (temps && temps.length > 1) {
+            tbed = temps[1]
+            targetbed.setAttribute('y1', 300 - temps[2]);
+            targetbed.setAttribute('y2', 300 - temps[2]);
+            var p = svgchart.createSVGPoint();
+            p.x = actualx; p.y = 300 - tbed;
+            svgpnts_bed.appendItem(p);
+          }
+
+          while(svgpnts_bed.numberOfItems > 0 && svgpnts_bed.getItem(0).x < 0) svgpnts_bed.removeItem(0);
+          while(svgpnts_estop.numberOfItems > 0 && svgpnts_estop.getItem(0).x < 0) svgpnts_estop.removeItem(0);
+        }
+
+        function parseSDmessage(msg) {
+          var pstatus = $('#printstatus').element;
+          var pfile = $('#pfilename').element;
+          var pprog = $('#pprog').element;
+          var pduration = $('#pduration').element;
+          if (msg.indexOf('Not SD printing') >= 0) {
+            pstatus.style.display = 'none';
+            sd_printing = false;
+            start_sd_print_date = null;
+          }
+          else if (msg.indexOf('SD printing byte') >= 0) {
+            sd_printing = true;
+
+            f = msg.match(/(\d+)/g)
+            if (f && f.length == 2)
+              pprog.value = f[0]/f[1]*100;
+            else
+              pprog.value = 0;
+            pprog.title = '{0}%'.format(pprog.value.toFixed(1));
+
+            if (pfile.innerHTML == '') { // if now know file name
+              send_gcode("M27 C",
+                function(req) {
+                  var msg = req.responseText;
+                  f = msg.substring(msg.indexOf('Current file: ')+14, msg.indexOf('\n'), '');
+                  pfile.innerHTML = f;
+                });
+            }
+
+            if (pduration.innerHTML == '') {  // if now know start time
+              send_gcode("M31",
+                function(req) {
+                  var str = req.responseText;
+                  f = str.match(/(\d+)/g);
+                  if (f) {
+                  	var multpl = [1, 60, 3600, 86400];
+                    var mlsec = 0;
+                    for(i = 3; i >= 0; i--) {
+                      if (f.length > i)
+                       	mlsec += f[f.length-i-1] * multpl[i] * 1000;
+                    }
+                    start_sd_print_date = new Date(new Date().getTime() - mlsec);
+                    agePrintDuration();
+                  }
+                });
+            }
+
+            pstatus.style.display = 'inline';
+            agePrintDuration();
+          }
         }
 
         function readOutOfBangMessage() {
+          setTimeout(readOutOfBangMessage, 3000);
+          if (gcode_lock)
+            return;
+          else
+            gcode_lock = true;
+
+          var reqtime = new Date().getTime();
           request('/msg', function(resp) {
-            if (resp !== "") {
-              add_cmd("Printer message");
-              add_resp(resp);
+            gcode_lock = false;
+            var lines = resp.responseText.split('\n');
+            var last_temp = null;
+            var other_lines = [];
+            for(i = 0; i < lines.length; i++) {
+              if (lines[i].indexOf('T:') >= 0) {// temperature
+                last_temp = lines[i];
+              }
+              else if (lines[i].indexOf('SD printing') >= 0)
+                parseSDmessage(lines[i]);
+              else if (lines[i].trim().length > 0)
+                other_lines.push(lines[i]);
             }
-          }, function () {});
-          setTimeout(readOutOfBangMessage, 2000);
+            if (last_temp)
+              parseAndAddTemperature(reqtime, last_temp);
+            if (other_lines.length > 0) {
+              add_cmd("Printer message");
+              add_resp(other_lines.join('\n'));
+            }
+          }, function () { gcode_lock = false; });
         }
 
         function show_alert(message) {
@@ -125,7 +254,8 @@
                 show_alert('Timeout.');
               else if (!onfail)
                 show_alert(req.responseText);
-              else
+
+              if (onfail)
                 onfail(req);
             }
           }
@@ -216,9 +346,15 @@
         }
 
         function print_file(id) {
+          if (sd_printing) return;
           var file = $("#f" + id).element.firstChild.nextSibling.innerHTML;
           send_gcode('M23 ' + file, function(req) {
-            send_gcode('M24');
+            send_gcode('M24', function() {
+              sd_printing = true;
+              start_sd_print_date = new Date();
+              agePrintDuration();
+              $('#pfilename').element.innerHTML = file;
+            });
           });
         }
 
@@ -238,15 +374,28 @@
           //var checksum = [...ncmd].reduce((x,y) => x ^ y.charCodeAt(0), 0);
           //ncmd += "*" + checksum;
           //gcode_n++;
+          if (gcode_lock) {
+            setTimeout(function() {send_gcode(cmd, onsuccess, skip_cmd_add);}, 1000);
+            return;
+          }
+
+          gcode_lock = true;
           var ncmd = cmd;
           if (!skip_cmd_add)
             add_cmd(ncmd);
-          request("/gcode?cmd=" + ncmd, function(req) {
+
+          var on_success = function(req) {
+            gcode_lock = false;
             if (!skip_cmd_add)
               add_resp(req.responseText);
             if (onsuccess)
               onsuccess(req);
-          });
+          };
+          var on_fail = function(req) {
+            gcode_lock = false;
+          }
+
+          request("/gcode?cmd=" + ncmd, on_success, on_fail);
         }
       </script>
       <style>
@@ -315,22 +464,31 @@
           font-weight: bold;
           fill: black;
         }
-        .y-grid text {
-          text-anchor: end;
-        }
+        .y-grid text { text-anchor: end; }
+        .x-grid text { text-anchor: middle; }
         g text,
         svg text { font-size: 17px; }
-        polyline { stroke-width: 2; }
+        polyline { fill: none; stroke-width: 3; }
+        #polybed { marker: url(#dotb); }
+        #polyestop { marker: url(#dote); }
       </style>
     </head>
     <body onload="init()">
-      <div id="header"><p style="font-size: larger; font-weight: bold;">3D Printer Wifi Panel</p></div>
+      <div id="header">
+        <p style="font-size: larger; font-weight: bold;">3D Printer Wifi Panel</p><br>
+        <div id="printstatus" style="display: none;">
+          <p>Printing:</p><text id="pfilename"></text>
+          <text id="pduration"></text>
+          <meter id="pprog" min="0" max="100" value="30" style="border: 1px solid #999; padding: 0;"></meter>
+          <button class="ibtn stop" title="Stop print" style="padding-right: 2px; height: 10px; " onclick="send_gcode('M524');"></button>
+        </div>
+      </div>
       <div id="alertdiv"></div>
       <div class="container">
         <div class="title">Movement</div>
         <div class="cnt">
           <div class="dline">
-            <button class="ibtn home">Home all</button>
+            <button class="ibtn home" style="margin-left:24px;">Home all</button>
             <button class="ibtn stop" onclick="send_gcode('M18');">Stop motors</button>
           </div>
           <div class="dline" id="xmov">
@@ -408,15 +566,23 @@
         </div>
       </div>
       <div class="container">
-        <div class="title">Temperature</div>
+        <div class="title">Temperature
+          <input type="checkbox" id="enabletemp" style="float: right;" onclick="setUpdateTemperature();"></input>
+        </div>
         <div class="cnt">
-          <svg id="tempchart" class="graph" viewbox="0 -40 450 360" width="100%">
+          <svg id="tempchart" class="graph" viewbox="-5 -40 450 360" width="100%">
             <defs>
-              <filter id="f1" width="300%" height="300%">
+              <!--<filter id="f1" width="300%" height="300%">
                 <feOffset result="offOut" in="SourceGraphic" dx="0" dy="0" />
                 <feGaussianBlur result="blurOut" in="offOut" stdDeviation="4" />
                 <feBlend in="SourceGraphic" in2="blurOut" mode="normal" />
-              </filter>
+              </filter>-->
+              <marker id="dotb" markerWidth="2" markerHeight="2" refX="1" refY="1">
+                <circle cx="1" cy="1" r="1" stroke="none" fill="#F48024"/>
+              </marker>
+              <marker id="dote" markerWidth="2" markerHeight="2" refX="1" refY="1">
+                <circle cx="1" cy="1" r="1" stroke="none" fill="#905"/>
+              </marker>
             </defs>
             <g style="text-anchor: end">
               <rect x="430" y="-15" width="20" height="20" fill="#F48024" stroke="black" />
@@ -437,18 +603,20 @@
             <g class="grid x-grid">
               <line x1="0" x2="430" y1="300" y2="300"></line>
               <text x="440" y="305" class="label-title">s</text>
-              <text x="0" y="320">-60</text>
-              <text x="70" y="320">-50</text>
-              <text x="140" y="320">-40</text>
-              <text x="210" y="320">-30</text>
-              <text x="280" y="320">-20</text>
-              <text x="350" y="320">-10</text>
+              <text x="0" y="320">60</text>
+              <text x="70" y="320">50</text>
+              <text x="140" y="320">40</text>
+              <text x="210" y="320">30</text>
+              <text x="280" y="320">20</text>
+              <text x="350" y="320">10</text>
               <text x="420" y="320">0</text>
             </g>
-            <polyline id='polybed' fill='none' stroke='#F48024' filter="url(#f1)"/>
-            <polyline id='polyestop' fill='none' stroke='#905' filter="url(#f1)"/>
+            <polyline id='polybed' stroke='#F48024'/>
+            <polyline id='polyestop' stroke='#905'/>
             <rect id='tooltiprect' style="visibility: hidden" x="0" y="0" fill='white' stroke='black' width='120' height='25'/>
             <text id='tooltiptext' style="visibility: hidden" x="0" y="0" />
+            <line id='targetbed' x1=0 x2=430 y1=300 y2=300 stroke="#f48024" fill='none' stroke-dasharray='5,5'/>
+            <line id='targetestop'  x1=0 x2=430 y1=300 y2=300 stroke="#905" fill='none' stroke-dasharray='5,5'/>
           </svg>
         </div>
       </div>
