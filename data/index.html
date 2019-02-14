@@ -613,10 +613,10 @@
             </g>
             <polyline id='polybed' stroke='#F48024'/>
             <polyline id='polyestop' stroke='#905'/>
-            <rect id='tooltiprect' style="visibility: hidden" x="0" y="0" fill='white' stroke='black' width='120' height='25'/>
-            <text id='tooltiptext' style="visibility: hidden" x="0" y="0" />
             <line id='targetbed' x1=0 x2=430 y1=300 y2=300 stroke="#f48024" fill='none' stroke-dasharray='5,5'/>
             <line id='targetestop'  x1=0 x2=430 y1=300 y2=300 stroke="#905" fill='none' stroke-dasharray='5,5'/>
+            <rect id='tooltiprect' style="visibility: hidden" x="0" y="0" fill='white' stroke='black' width='120' height='25'/>
+            <text id='tooltiptext' style="visibility: hidden" x="0" y="0" />
           </svg>
         </div>
       </div>
@@ -624,7 +624,7 @@
         <div class="title">Files</div>
         <div class="cnt">
           <label class="customfileinput ibtn" for="sdfile">Upload to SD</label>
-          <input id="sdfile" type="file" name="name" onchange="upload_sd_file(sdfile.value);">
+          <input id="sdfile" type="file" name="name" onchange="upload_sd_file(sdfile.value);" accept=".gcode,.gco,.g,.nc">
           <progress id="prgbar" style="display: none; width: 60px; float: left; margin-right: 5px; " value="0" max="100"></progress>
           <p id="eta" style="display: none; float: left; margin-right: 5px; "></p>
           <button id="refresh" class="ibtn refresh" onclick="refresh_sd_file_list();"></button>
