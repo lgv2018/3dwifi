@@ -19,6 +19,7 @@
         var gcode_lock = false;
         var lasttemp_time = new Date().getTime();
         var start_sd_print_date = null;
+        var skip_outofbang = 0;
 
         function init() {
           var cmd = $('#cmd');
@@ -191,11 +192,11 @@
                   var str = req.responseText;
                   f = str.match(/(\d+)/g);
                   if (f) {
-                  	var multpl = [1, 60, 3600, 86400];
+                    var multpl = [1, 60, 3600, 86400];
                     var mlsec = 0;
                     for(i = 3; i >= 0; i--) {
                       if (f.length > i)
-                       	mlsec += f[f.length-i-1] * multpl[i] * 1000;
+                        mlsec += f[f.length-i-1] * multpl[i] * 1000;
                     }
                     start_sd_print_date = new Date(new Date().getTime() - mlsec);
                     agePrintDuration();
@@ -210,6 +211,8 @@
 
         function readOutOfBangMessage() {
           setTimeout(readOutOfBangMessage, 3000);
+          if (skip_outofbang)
+            return;
           if (gcode_lock)
             return;
           else
@@ -268,26 +271,51 @@
           req.send();
         }
 
+        function update_file_list(files) {
+          var tbody = $('#sd_files > tbody');
+          tbody.html('');
+          msg = files.substring(files.indexOf('Begin file list'), files.indexOf('End file list'))
+          var files = msg.replace(/\r/g, '').split('\n');
+          // first line = Begin file list
+          // last 2 lines = End file list \n ok \n
+          for (var i = 1; i < files.length - 1; i++) {
+            var columns = files[i].split(' ');
+            tbody.append(`
+              <tr id='f{0}'>
+                <td class='name'>{1}</td>
+                <td class='size'>{2}</td>
+                <td class='actions'>
+                  <button class='ibtn print' value='{0}' onclick='print_file({0});'/>
+                  <button class='ibtn trash' value='{0}' onclick='del_file({0});'/>
+                </td>
+              </tr>`.format(i, columns[0], fileSizeSI(parseInt(columns[1]))));
+          }
+        }
+
         function refresh_sd_file_list() {
+          skip_outofbang = true;
           send_gcode('M21', function(req) {
             send_gcode('M20', function(req) {
-              var tbody = $('#sd_files > tbody');
-              tbody.html('');
-              var files = req.responseText.replace(/\r/g, '').split('\n');
-              // first line = Begin file list
-              // last 2 lines = End file list \n ok \n
-              for (var i = 1; i < files.length - 3; i++) {
-                var columns = files[i].split(' ');
-                tbody.append(`
-                  <tr id='f{0}'>
-                    <td class='name'>{1}</td>
-                    <td class='size'>{2}</td>
-                    <td class='actions'>
-                      <button class='ibtn print' value='{0}' onclick='print_file({0});'/>
-                      <button class='ibtn trash' value='{0}' onclick='del_file({0});'/>
-                    </td>
-                  </tr>`.format(i, columns[0], fileSizeSI(parseInt(columns[1]))));
+              var msg = req.responseText;
+              var wait = false;
+              var wait_for_msg_end = function() {
+                if (msg.indexOf('End file list') != -1) {
+                  skip_outofbang = false; 
+                  update_file_list(msg); 
+                }
+                else {
+                  request('/msg', 
+                    function(resp) {
+                      msg = msg + resp.responseText;
+                      wait_for_msg_end();
+                    }, 
+                    function () { 
+                      skip_outofbang = false; 
+                    }
+                  );
+                }
               }
+              wait_for_msg_end();
             }, true);
           });
         }
