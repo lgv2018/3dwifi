@@ -53,9 +53,9 @@ void setup() {
   char *configBuf = new char[size];
   configFile.readBytes(configBuf, size);
 
-  DynamicJsonBuffer configDynBuffer;
-  JsonObject& configJson = configDynBuffer.parseObject(configBuf);
-  if (!configJson.success()) {
+  DynamicJsonDocument configJson(1024);
+  DeserializationError error = deserializeJson(configJson, configBuf);
+  if (error) {
     fallback_serial_error(error_msg_invalid_fmt);
     return;
   }
