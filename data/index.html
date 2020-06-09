@@ -16,10 +16,11 @@
         var enabletemp;
         var pduration;
         var sd_printing = false;
+        var print_sd_panel = false;
         var gcode_lock = false;
         var lasttemp_time = new Date().getTime();
         var start_sd_print_date = null;
-        var skip_outofbang = 0;
+        var gcodeid = 0;
 
         function init() {
           var cmd = $('#cmd');
@@ -27,9 +28,11 @@
           alertdiv = $('#alertdiv');
           cmds = $('#cmds');
           enabletemp = $('#enabletemp').element;
+          pduration = $('#pduration').element;
 
           $('.movbtn').foreach(function(i, elem) {
             $(elem).on('click', function() {
+              send_gcode('G91');
               send_gcode('G0 ' + elem.value);
             })
           });
@@ -65,10 +68,33 @@
           polybed.onmouseout = tipout;
           polyestop.onmouseout = tipout;
 
-          setTimeout(readOutOfBangMessage, 1000);
+          readPrinterMessages();
 
-          pduration = $('#pduration').element;
-          send_gcode("M27 S10"); // monitor sd printing progress
+          // monitor printer sd printing progress
+          checkPrintStatus();
+        }
+
+        function readPanelSdPrintStatus() {
+          request('/printstatus', function(req) {
+            parseSDmessage(req.responseText);
+            if (sd_printing)
+              setTimeout(readPanelSdPrintStatus, 10000);
+          });          
+        }
+
+        function checkPrintStatus() {
+          var on_success = function(req) {
+            parseSDmessage(req.responseText);
+            if (sd_printing) { // printing from panel SD
+              print_sd_panel = true;
+              setTimeout(readPanelSdPrintStatus, 10000);
+            }
+            else {
+              // printing from printer SD?
+              send_gcode("M27 S10");
+            }
+          }
+          request('/printstatus', on_success);
         }
 
         function agePrintDuration() {
@@ -178,30 +204,13 @@
             pprog.title = '{0}%'.format(pprog.value.toFixed(1));
 
             if (pfile.innerHTML == '') { // if now know file name
-              send_gcode("M27 C",
-                function(req) {
-                  var msg = req.responseText;
-                  f = msg.substring(msg.indexOf('Current file: ')+14, msg.indexOf('\n'), '');
-                  pfile.innerHTML = f;
-                });
+              if (!print_sd_panel)
+                send_gcode("M27 C");
             }
 
             if (pduration.innerHTML == '') {  // if now know start time
-              send_gcode("M31",
-                function(req) {
-                  var str = req.responseText;
-                  f = str.match(/(\d+)/g);
-                  if (f) {
-                    var multpl = [1, 60, 3600, 86400];
-                    var mlsec = 0;
-                    for(i = 3; i >= 0; i--) {
-                      if (f.length > i)
-                        mlsec += f[f.length-i-1] * multpl[i] * 1000;
-                    }
-                    start_sd_print_date = new Date(new Date().getTime() - mlsec);
-                    agePrintDuration();
-                  }
-                });
+              if (!print_sd_panel)
+                send_gcode("M31");
             }
 
             pstatus.style.display = 'inline';
@@ -209,17 +218,36 @@
           }
         }
 
-        function readOutOfBangMessage() {
-          setTimeout(readOutOfBangMessage, 3000);
-          if (skip_outofbang)
-            return;
+        function parseFileName(msg) {
+          f = msg.substring(msg.indexOf('Current file: ')+14, msg.indexOf('\n'), '');
+          pfile.innerHTML = f;
+        }
+
+        function parsePrintTime(str) {
+          f = str.match(/(\d+)/g);
+          if (f) {
+            var multpl = [1, 60, 3600, 86400];
+            var mlsec = 0;
+            for(i = 3; i >= 0; i--) {
+              if (f.length > i)
+                mlsec += f[f.length-i-1] * multpl[i] * 1000;
+            }
+            start_sd_print_date = new Date(new Date().getTime() - mlsec);
+            agePrintDuration();
+          }
+        }
+
+        function readPrinterMessages() {
+          setTimeout(readPrinterMessages, 3000);
+
           if (gcode_lock)
             return;
           else
             gcode_lock = true;
 
           var reqtime = new Date().getTime();
-          request('/msg', function(resp) {
+
+          var onSuccess = function(resp) {
             gcode_lock = false;
             var lines = resp.responseText.split('\n');
             var last_temp = null;
@@ -228,18 +256,28 @@
               if (lines[i].indexOf('T:') >= 0) {// temperature
                 last_temp = lines[i];
               }
-              else if (lines[i].indexOf('SD printing') >= 0)
-                parseSDmessage(lines[i]);
+              else if (lines[i].indexOf('SD printing') >= 0) {
+                if (!print_sd_panel)
+                    parseSDmessage(lines[i]);
+              }
+              else if (lines[i].indexOf('Current file:') >= 0)
+                parseFileName(lines[i]);
+              else if (lines[i].indexOf('Print time:') >= 0)
+                parsePrintTime(lines[i]);
               else if (lines[i].trim().length > 0)
                 other_lines.push(lines[i]);
             }
             if (last_temp)
               parseAndAddTemperature(reqtime, last_temp);
             if (other_lines.length > 0) {
-              add_cmd("Printer message");
               add_resp(other_lines.join('\n'));
             }
-          }, function () { gcode_lock = false; });
+          }
+          var onFail = function(resp) {
+            gcode_lock = false;
+          }
+
+          request('/msg', onSuccess, onFail);
         }
 
         function show_alert(message) {
@@ -271,15 +309,13 @@
           req.send();
         }
 
-        function update_file_list(files) {
+        function update_file_list(msg) {
           var tbody = $('#sd_files > tbody');
           tbody.html('');
-          msg = files.substring(files.indexOf('Begin file list'), files.indexOf('End file list'))
-          var files = msg.replace(/\r/g, '').split('\n');
-          // first line = Begin file list
-          // last 2 lines = End file list \n ok \n
-          for (var i = 1; i < files.length - 1; i++) {
-            var columns = files[i].split(' ');
+          var files = msg.trim().replace(/\r/g, '').split('\n');
+          files.sort();
+          for (var i = 0; i < files.length; i++) {
+            var columns = files[i].split('\t');
             tbody.append(`
               <tr id='f{0}'>
                 <td class='name'>{1}</td>
@@ -293,42 +329,16 @@
         }
 
         function refresh_sd_file_list() {
-          skip_outofbang = true;
-          send_gcode('M21', function(req) {
-            send_gcode('M20', function(req) {
-              var msg = req.responseText;
-              var wait = false;
-              var wait_for_msg_end = function() {
-                if (msg.indexOf('End file list') != -1) {
-                  skip_outofbang = false; 
-                  update_file_list(msg); 
-                }
-                else {
-                  request('/msg', 
-                    function(resp) {
-                      msg = msg + resp.responseText;
-                      wait_for_msg_end();
-                    }, 
-                    function () { 
-                      skip_outofbang = false; 
-                    }
-                  );
-                }
-              }
-              wait_for_msg_end();
-            }, true);
-          });
+          on_success = function(resp) {
+            update_file_list(resp.responseText);
+          }
+          request('/getsdfiles', on_success);
         }
 
         function upload_sd_file(filename) {
           var start = new Date().getTime();
           var sdfile = $("#sdfile").element;
           filename = filename.split(/(\\|\/)/g).pop();
-
-          // filename to 8.3 format
-          arr = filename.replace(/ /g, '').split('.');
-          if (arr.length == 1) arr[1] = 'g';
-          filename = arr[0].substr(-8) + '.' + arr[1].substr(0, 3);
 
           var formData = new FormData();
           formData.append('filename', filename);
@@ -363,67 +373,93 @@
           };
           req.send(formData);
           sdfile.value = "";
-          add_cmd("Raw upload " + filename);
+          add_cmd("SD upload " + filename);
         }
 
         function del_file(id) {
           var file = $("#f" + id).element.firstChild.nextSibling.innerHTML;
-          send_gcode('M30 ' + file, function(req) {
+          request('/removesdfile?file=' + file, function(req) {
             $("#sd_files").element.deleteRow($("#f" + id).element.rowIndex);
           });
         }
 
         function print_file(id) {
-          if (sd_printing) return;
-          var file = $("#f" + id).element.firstChild.nextSibling.innerHTML;
-          send_gcode('M23 ' + file, function(req) {
-            send_gcode('M24', function() {
+          if (!sd_printing) {
+            print_sd_panel = true;
+            var file = $("#f" + id).element.firstChild.nextSibling.innerHTML;
+            request('/printsdfile?file=' + file, function() {
+              add_cmd("Print " + file);
               sd_printing = true;
               start_sd_print_date = new Date();
               agePrintDuration();
               $('#pfilename').element.innerHTML = file;
+              readPanelSdPrintStatus();
             });
-          });
+          }
         }
 
-        function add_cmd(cmd) {
-          cmds.append('<div class="gc">' + cmd + '</div>');
+        function cancelPrint() {
+          if (sd_printing) {
+            if (!print_sd_panel)
+              send_gcode('M524');
+            else {
+              request('/cancelsdprint', function() {
+                sd_printing = false;
+                print_sd_panel = false;
+              });
+            }
+          }
+        }
+
+        function add_cmd(cmd, id="") {
+          cmds.append('<div class="gc">' + cmd + '<span id="cmd' + id + '"></span></div>');
           cmds.element.scrollTop = cmds.element.scrollHeight;
+        }
+
+        function get_gcode_status(resp, id) {
+          var obj = JSON.parse(resp);
+          request('/gcodestatus?idx=' + obj.idx,
+            function(req) {
+              var obj = JSON.parse(req.responseText);
+              $('#cmd' + id).html(obj.status);
+              if (obj.status == 'SEND')
+                setTimeout(function() { get_gcode_status(resp, id); }, 1000);
+            });
         }
 
         function add_resp(resp) {
           var msgs = resp.split('\n').join('<br>');
-          cmds.append('<p class="gr">' + msgs + '</p>');
+          cmds.append('<p class="gr">' + msgs + '</p><br>');
           cmds.element.scrollTop = cmds.element.scrollHeight;
         }
 
-        function send_gcode(cmd, onsuccess, skip_cmd_add) {
+        function send_gcode(cmd, skip_cmd_add) {
           //var ncmd = "N{0} {1}".format(gcode_n, cmd);
           //var checksum = [...ncmd].reduce((x,y) => x ^ y.charCodeAt(0), 0);
           //ncmd += "*" + checksum;
           //gcode_n++;
           if (gcode_lock) {
-            setTimeout(function() {send_gcode(cmd, onsuccess, skip_cmd_add);}, 1000);
+            setTimeout(function() {send_gcode(cmd, skip_cmd_add);}, 1000);
             return;
           }
 
           gcode_lock = true;
           var ncmd = cmd;
           if (!skip_cmd_add)
-            add_cmd(ncmd);
+            add_cmd(ncmd, gcodeid);
 
+          let cmdid = gcodeid++;
           var on_success = function(req) {
             gcode_lock = false;
             if (!skip_cmd_add)
-              add_resp(req.responseText);
-            if (onsuccess)
-              onsuccess(req);
+              setTimeout(function() { get_gcode_status(req.responseText, cmdid); }, 1000);
           };
           var on_fail = function(req) {
             gcode_lock = false;
           }
 
           request("/gcode?cmd=" + ncmd, on_success, on_fail);
+          gcodeid++;
         }
       </script>
       <style>
@@ -471,6 +507,7 @@
         .ibtn.refresh { background-image: url(/img/refresh.svg); padding-right: 2px; }
         .ibtn.off { background-image: url(/img/power-off.svg); padding-right: 2px; }
         .gc { font-family: monospace; border: 1px solid #aaa; border-left: 3px solid #95adf3; background-color: #eee; margin-bottom: 1px; max-width: 330px; }
+        .gc span { float: right; padding: 0; font-family: monospace; }
         .gr { font-family: monospace; max-width: 330px; }
         #header { min-height: 40px; margin: -10px; margin-bottom: 10px; background-color: #ccc;
           box-shadow: 0px 3px 3px #888; font-size: large;}
@@ -508,7 +545,7 @@
           <p>Printing:</p><text id="pfilename"></text>
           <text id="pduration"></text>
           <meter id="pprog" min="0" max="100" value="30" style="border: 1px solid #999; padding: 0;"></meter>
-          <button class="ibtn stop" title="Stop print" style="padding-right: 2px; height: 10px; " onclick="send_gcode('M524');"></button>
+          <button class="ibtn stop" title="Stop print" style="padding-right: 2px; height: 10px; " onclick="cancelPrint();"></button>
         </div>
       </div>
       <div id="alertdiv"></div>
@@ -669,7 +706,7 @@
         <div class="title">Commands</div>
         <div class="cnt">
           <div id="cmds" style="overflow: auto; width: 100%; box-sizing: border-box; height: 200px; background-color: white; border: 1px inset; "></div><br/>
-          <label>G-code:</label><input id="cmd"></input>
+          <label>G-code:</label><input id="cmd" maxlength="510"></input>
           <button id="send">Send</button>
           <button id="clear">Clear</button>
         </div>

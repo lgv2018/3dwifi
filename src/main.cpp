@@ -1,32 +1,32 @@
-#include <ESP8266WiFi.h>
-#include <ESP8266mDNS.h>
-#include <ESP8266WebServer.h>
+#define FS_NO_GLOBALS // to coexist with SdFat
 #include <FS.h>
+
+#include <ESP8266mDNS.h>
 #include <WiFiClient.h>
 #include <ArduinoJson.h>
+#include <SPI.h>
+#include <ArduinoOTA.h>
 
-static const char *config_file_name = "/config.json";
-static const char *error_msg_spiffs = "Error opening SPIFFS or /config.json.";
-static const char *error_msg_invalid_fmt = "Invalid json format in /config.json";
+#include "web.h"
 
-ESP8266WebServer server(80);    // Create a webserver object that listens for HTTP request on port 80
-File fsUploadFile;              // File object to temporary receive a file
+sdfat::SdFat SD;
+bool SD_mounted;
 
-static uint32_t gcode_cur_lineno = 1; // last gcode line sent
+const char *config_file_name = "/config.json";
+const char *error_msg_spiffs = "Error opening SPIFFS or /config.json.";
+const char *error_msg_microsd = "Error mounting SD Card.";
+const char *error_msg_invalid_fmt = "Invalid json format in /config.json";
 
-String getContentType(String filename); // convert the file extension to the MIME type
-bool handleFileRead(String path);       // send the right file to the client (if it exists)
-void handleFileUpload();                // upload a new file to the SPIFFS]
-void handleGcode();
-void handleOutOfBandMessage();
-void handleSdUpload();
-
-void serial_message(const char *msg, const char *value = NULL) {
-  Serial.print("M117 ");
-  Serial.print(msg);
-  if (value)
-    Serial.print(value);
-  Serial.println("\n");
+#define SD_CS_PIN 16
+    
+void serial_message(const char *msg, const char *value) {
+  String aux("M117 ");
+  aux.concat(msg);
+  if (value) {
+    aux.concat(" ");
+    aux.concat(value);
+  }
+  send_gcode_raw(aux.c_str(), false, 0);
 }
 
 void fallback_serial_error(const char *error_msg) {
@@ -37,13 +37,31 @@ void fallback_serial_error(const char *error_msg) {
 }
 
 void setup() {
+
+  /*Serial.begin(115200);
+  for(int pin = 22; pin >= 1; pin--) {
+    if (pin == 11) continue;
+    if (pin == 8) continue;
+    Serial.println(pin);
+    pinMode(pin, OUTPUT);
+    int i = 5;
+    while(i--) {
+      digitalWrite(pin, HIGH);
+      delay(500);
+      digitalWrite(pin, LOW);
+      delay(500);
+    }
+  }*/
+
+  system_update_cpu_freq(160);
+
   if (!SPIFFS.begin() ||
       !SPIFFS.exists(config_file_name)) {
     fallback_serial_error(error_msg_spiffs);
     return;
   }
 
-  File configFile = SPIFFS.open(config_file_name, "r");
+  fs::File configFile = SPIFFS.open(config_file_name, "r");
   if (!configFile) {
     fallback_serial_error(error_msg_spiffs);
     return;
@@ -62,6 +80,22 @@ void setup() {
 
   Serial.begin(configJson["serial_speed"]);
 
+  /* ESP8266 bootloader sends garbage to Marlin while
+   * booting. The code below clears the read buffer
+   * on startup and reset line number. We assume
+   * Marlin can 'ignore' the garbage. The only viable 
+   * solution other than that appears to be replacing 
+   * the ESP bootloader.
+   */
+  /*size_t len = Serial.available();
+  while(len--) Serial.read();*/
+
+  delay(2000); // wait printer ready
+
+  // reset command number after start
+  send_gcode("\nM110 N0", false);
+  gcode_cur_lineno = 1;
+
   const char *dnshn = configJson["mDNS_hostname"];
   if (!MDNS.begin(dnshn))
     serial_message("Error setting mDNS hostname: ", dnshn);
@@ -69,7 +103,7 @@ void setup() {
   // setup WIFI
   const char *ssid = configJson["wifi_ssid"];
   const char *passwd = configJson["wifi_password"];
-  serial_message("Wifi connecting to ", ssid);
+  serial_message("Wifi connecting to", ssid);
   const bool isap = configJson["wifi_ap"];
   bool need_fallback = false;
 
@@ -103,9 +137,23 @@ void setup() {
   else
     ip = WiFi.localIP().toString();
 
-  char msgbuff[256];
-  snprintf(msgbuff, 256, "SSID: %s, IP %s", ssid, ip.c_str());
-  serial_message(msgbuff);
+  //SD_mounted = SD.begin(SD_CS_PIN, SPI_HALF_SPEED);
+  SD_mounted = SD.begin(SD_CS_PIN);
+  if (!SD_mounted) {
+    serial_message(error_msg_microsd);
+    SD.initErrorPrint();
+    //delay(2000);
+  } else {
+    /*float cardSize = SD.card()->cardSize()*512.0e-9;
+    float freeSize = SD.vol()->freeClusterCount() * SD.vol()->blocksPerCluster() * 512.0e-9; 
+    snprintf(buffer, BUFF_SIZE, "SD %.1fGB free/%.1fGB", freeSize, cardSize);
+    serial_message(buffer);
+    delay(2000);*/
+    serial_message("SD Card ready.");
+  }
+
+  snprintf(buffer, BUFF_SIZE, "%s in %s", ip.c_str(), ssid);
+  serial_message(buffer);
 
   // setup Web Server
 
@@ -120,13 +168,20 @@ void setup() {
   );
 
   server.on("/gcode", HTTP_GET, handleGcode);
-  server.on("/msg", HTTP_GET, handleOutOfBandMessage);
+  server.on("/gcodestatus", HTTP_GET, handleGcodeStatus);
+  server.on("/msg", HTTP_GET, handleGetPrinterMessages);
 
+  server.on("/getsdfiles", HTTP_GET, handleGetSdFiles);
+  server.on("/removesdfile", HTTP_GET, handleRemoveSdFile);
+  server.on("/printsdfile", HTTP_GET, handlePrintSdFile);
+  server.on("/cancelsdprint", HTTP_GET, handleCancelSdPrint);
+  server.on("/printstatus", handlePrintSdStatus);
+  
   server.on("/sdupload", HTTP_POST, [](){
     server.setContentLength(CONTENT_LENGTH_UNKNOWN);
     server.sendHeader("Content-type", "text/plain");
     server.send(200); },
-    handleSdUpload);
+    handleSDFileUpload);
 
   server.onNotFound([]() {                              // If the client requests any URI
     if (!handleFileRead(server.uri()))                  // send it if it exists
@@ -135,314 +190,42 @@ void setup() {
 
   server.begin();                           // Actually start the server
   //serial_message("HTTP server started");
+
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    snprintf(buffer, BUFF_SIZE, "OTA: %u%%", (progress / (total / 100)));
+    serial_message(buffer);
+  });
+
+  ArduinoOTA.onError([](ota_error_t error) {
+    const char *errordesc = NULL;
+    if (error == OTA_AUTH_ERROR) errordesc = "Auth Failed";
+    else if (error == OTA_BEGIN_ERROR) errordesc = "Begin Failed";
+    else if (error == OTA_CONNECT_ERROR) errordesc = "Connect Failed";
+    else if (error == OTA_RECEIVE_ERROR) errordesc = "Receive Failed";
+    else if (error == OTA_END_ERROR) errordesc = "End Failed";
+    snprintf(buffer, BUFF_SIZE, "OTA Error[%u]: %s", error, errordesc);
+    serial_message(buffer);
+  });
+  ArduinoOTA.begin();
 }
 
 void loop() {
-  server.handleClient();
-}
+  // read printer messages
+  readSerialMessages();
 
-String getContentType(String filename) { // convert the file extension to the MIME type
-  if (filename.endsWith(".html")) return "text/html";
-  else if (filename.endsWith(".css")) return "text/css";
-  else if (filename.endsWith(".js")) return "application/javascript";
-  else if (filename.endsWith(".ico")) return "image/x-icon";
-  else if (filename.endsWith(".svg")) return "image/svg+xml";
-  else if (filename.endsWith(".gz")) return "application/x-gzip";
-  return "text/plain";
-}
-
-bool handleFileRead(String path) {
-  // send the right file to the client (if it exists)
-  String pathWithGz = path + ".gz";
-
-  if (path.endsWith("/"))
-    path += "index.html";
-
-   // If the file exists, either as a compressed archive, or normal
-   if (SPIFFS.exists(pathWithGz))
-     path += ".gz";
-
-  if (SPIFFS.exists(path)) {
-    File file = SPIFFS.open(path, "r");
-    String contentType = getContentType(path);
-    server.streamFile(file, contentType);
-    file.close();
-    return true;
-  }
-
-  return false;
-}
-
-void handleOutOfBandMessage() {
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server.sendHeader("Content-type", "text/plain");
-  server.send(200);
-  bool last_is_eol = true;
-  do {
-    size_t len = Serial.available();
-    if (len == 0 && !last_is_eol) {
-      delay(5);
-      continue;
-    }
-    else if (len > 0) {
-      char buf[len+1];
-      Serial.readBytes(buf, len);
-      last_is_eol = buf[len-1] == '\n';
-      buf[len] = 0;
-      server.sendContent(buf);
-    }
-    else
-      break;
-  } while (true);
-}
-
-String send_gcode(const char *cmd, bool waitresp = true, bool checksum = true) {
-  String resp;
-  char lineno[20];
-  char chksumstr[20];
-
-  if (checksum) {
-    sprintf(lineno, "N%d ", gcode_cur_lineno);
-
-    // compute checksum
-    int checksum = 0;
-    int i = 0;
-    while(lineno[i]) {
-      checksum ^= lineno[i];
-      i++;
-    }
-    i = 0;
-    while(cmd[i]) {
-      checksum ^= cmd[i];
-      i++;
-    }
-    sprintf(chksumstr, "*%d\n", checksum);
-  }
-
-  // check pending messages
-  size_t plen = Serial.available();
-  if (plen > 0) {
-    char buff[plen+1];
-    Serial.readBytes(buff, plen);
-    resp.concat(buff);
-  }
-
-  // send command
-  if (checksum)
-    Serial.write(lineno);
-  Serial.write(cmd);
-  if (checksum)
-    Serial.write(chksumstr);
+  // if printing, put commands to the printer
+  bool can_continue_sending = false;
+  if (cmd_queue_resend != -1)
+    resend_gcode();
   else
-    Serial.write("\n");
-  Serial.flush();
+    can_continue_sending = sendPrinterCommandIfPrinting();
 
-  //debug
-  /*server.sendContent(lineno);
-  server.sendContent(cmd);
-  server.sendContent(chksumstr);*/
-
-  #define TIMEOUT_READ 200 // ~ 1s
-  int timeout = TIMEOUT_READ;
-  char last = 0;
-  int exitst = 0;
-  do {
-    size_t len = Serial.available();
-    if (len > 0) {
-      char buf[len+1];
-      buf[len] = 0;
-
-      for(size_t i = 0; i < len; i++) {
-        buf[i] = Serial.read();
-
-        // identify message end
-        if (buf[i] == ':') exitst = 5; // : identify a message from the firmware, wait for a '\n'
-        else if (exitst == 0) {
-          if ((last == 'o' && buf[i] == 'k')
-            ||(last == '!' && buf[i] == '!')
-            ||(last == 'r' && buf[i] == 's')) exitst = 1;
-        }
-        else if (exitst == 5) {
-          if (buf[i] == '\n') exitst = 0;
-        }
-        else if (exitst == 1) {
-          if (buf[i] == '\n') {
-            buf[i+1] = 0;
-            exitst = 2;
-            break;
-          }
-        }
-        last = buf[i];
-      }
-      resp.concat(buf);
-      if (exitst == 2) break;
-      timeout = TIMEOUT_READ;
-    } else {
-      if (!waitresp)
-        break;
-      delay(5);
-      if (--timeout == 0) // timeout
-        break;
-    }
-  } while (true);
-
-  if (!(resp.indexOf("Error:") > 0 || resp.indexOf("Resend:") > 0))
-    gcode_cur_lineno++;
-
-  return resp;
-}
-
-void handleGcode() {
-  String cmd = server.arg("cmd");
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server.sendHeader("Content-type", "text/plain");
-  server.send(200);
-  String resp = send_gcode(cmd.c_str());
-  server.sendContent(resp);
-}
-
-void handleFileUpload() {
-  // upload a new file to the SPIFFS
-
-  HTTPUpload& upload = server.upload();
-  if (upload.status == UPLOAD_FILE_START) {
-    String filename = upload.filename;
-    if (!filename.startsWith("/"))
-      filename = "/" + filename;
-
-    fsUploadFile = SPIFFS.open(filename, "w");
-    filename = String();
-
-  } else if (upload.status == UPLOAD_FILE_WRITE) {
-     // Write the received bytes to the file
-     if (fsUploadFile)
-      fsUploadFile.write(upload.buf, upload.currentSize);
-
-  } else if (upload.status == UPLOAD_FILE_END) {
-    if (fsUploadFile) {
-      fsUploadFile.close();
-      serial_message("Upload ended. Size: ", String(upload.totalSize).c_str());
-      server.sendHeader("Location","/index.html");      // Redirect the client to the success page
-      server.send(303);
-    } else {
-      server.send(500, "text/plain", "500: couldn't create file");
-    }
-  }
-}
-
-#define MAX_RAW_SIZE 512 // need to be <= than printer raw size
-#define EOT 4
-#define ACK 6
-#define NCK 21
-#define ETB 23
-#define CAN 24
-
-char sendBuffer(const char *buffer_line, size_t len, int *retrans) {
-  int i = 10;
-  do {
-    Serial.write((const uint8_t*)buffer_line, len);
-    // wait for resp
-    int j = 1000;
-    while (Serial.available() < 1) {
-      delay(5);
-      j--;
-      if (j == 0) return NCK;
-    }
-
-    char resp = Serial.read();
-    if (resp != NCK)
-      return resp;
-
-    (*retrans)++;
-  } while (i--);
-  return NCK;
-}
-
-void handleSdUpload() {
-  // upload a new file to Printer SD CARD
-
-  static char buffer_line[MAX_RAW_SIZE+2];
-  static size_t buffer_pos;
-  static char resp;
-  static char chksum;
-  static long start;
-  static int error_count;
-
-  HTTPUpload& upload = server.upload();
-  if (upload.status == UPLOAD_FILE_START) {
-    String filename = upload.filename;
-    if (!filename.startsWith("/"))
-      filename = "/" + filename;
-
-    chksum = 0;
-    buffer_pos = 0;
-    resp = ACK;
-    error_count = 0;
-    start = millis();
-
-    String cmd = "M28 !"; // ! indicates raw transfer
-    cmd += filename;
-    String response = send_gcode(cmd.c_str());
-    server.sendContent(response);
-    if (response.indexOf("Error:") >= 0 ||
-        response.indexOf("failed") >= 0) {
-      server.sendContent(response);
-      resp = CAN;
-    }
-
-  } else if (upload.status == UPLOAD_FILE_WRITE) {
-    if (resp != ACK) return;
-
-    for(size_t i = 0; i < upload.currentSize; i++) {
-      char c = upload.buf[i];
-      buffer_line[buffer_pos++] = c;
-      chksum ^= c;
-      if (buffer_pos == MAX_RAW_SIZE) {
-        buffer_line[buffer_pos++] = ETB; // end of block
-        buffer_line[buffer_pos++] = chksum;
-        resp = sendBuffer(buffer_line, buffer_pos, &error_count);
-        if (resp != ACK) {
-          server.sendContent("Error sending block.");
-          break;
-        }
-        buffer_pos = 0;
-        chksum = 0;
-      }
-    }
-
-  } else if (upload.status == UPLOAD_FILE_END) {
-    if (resp == ACK && buffer_pos > 0) {
-      buffer_line[buffer_pos++] = ETB;
-      buffer_line[buffer_pos++] = chksum;
-      resp = sendBuffer(buffer_line, buffer_pos, &error_count);
-      if (resp != ACK)
-        server.sendContent("Error sending last block.");
-    }
-
-    bool success = resp == ACK;
-
-    if (resp != EOT && resp != CAN) { // the printer is still running the protocol, finish it
-      buffer_pos = 0;
-      buffer_line[buffer_pos++] = EOT; // end of transmission
-      resp = sendBuffer(buffer_line, buffer_pos, &error_count);
-      if (resp != EOT) { // end transmission not ok
-        server.sendContent("Error finishing transmission. Reset printer!");
-      }
-    }
-
-    // send transmission feedback to printer and browser
-    long lsecs = (millis() - start) / 1000;
-    int mins = lsecs / 60;
-    int secs = lsecs % 60;
-    sprintf(buffer_line, "Errors: %d\nTime: %d:%d\nStatus: %s!\n",
-      error_count, mins, secs, success ? "Success" : "Failed");
-    if (success) {
-      serial_message("SD upload successed: ", String(upload.totalSize).c_str());
-      server.sendContent(String(buffer_line));
-    }
-    else {
-      serial_message("SD upload failed.");
-      server.sendContent(String(buffer_line));
-    }
+  if (!can_continue_sending) {
+    // handle HTTP request
+    server.handleClient();
+  
+    // firmware upgrade over the air
+    if (!printingFile.isOpen())
+      ArduinoOTA.handle();
   }
 }

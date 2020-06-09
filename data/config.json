@@ -1,11 +1,11 @@
 {
-  "mDNS_hostname": "esp8266",
+  "mDNS_hostname": "Square Axis 3d Printer",
 
   "wifi_ap": false,
   "wifi_ssid": "TATU 2",
   "wifi_password": "bolarolou",
 
-  "serial_speed": "250000",
+  "serial_speed": "115200",
 
   "sd_file_new": "M20 /%s",
   "sd_file_finish": "M29",
